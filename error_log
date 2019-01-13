@@ -1,0 +1,1 @@
+[10-Jan-2019 01:34:44 Europe/Berlin] PHP Fatal error:  Allowed memory size of 33554432 bytes exhausted (tried to allocate 69632 bytes) in /home/nyaarter/bioblitz.gmbl.se/includes/database/database.inc on line 2227

@@ -1,0 +1,303 @@
+<?php
+
+/**
+ * @file
+ * Defines a view mode to set up the columns of the table for the IEF widget.
+ */
+
+/**
+ * The name of the view mode.
+ */
+define('IEF_TABLE_VIEW_MODE_NAME', 'ief_table');
+
+/**
+ * Implements hook_inline_entity_form_table_fields_alter().
+ */
+function ief_table_view_mode_inline_entity_form_table_fields_alter(&$fields, $context) {
+  $entity_type = $context['entity_type'];
+  $original_fields = $fields;
+  $old_fields = array();
+  $change_apply = FALSE;
+  // Get the instance of the field.
+  $instance = field_info_instance($context['parent_entity_type'], $context['field_name'], $context['parent_bundle']);
+  $allowed_bundles = isset($instance['widget']['settings']['type_settings']['ief_table_view_mode']['bundles']) ?
+          $instance['widget']['settings']['type_settings']['ief_table_view_mode']['bundles'] : array();
+  $filter_bundle = FALSE;
+  if (!empty($allowed_bundles)) {
+    $allowed_bundles_count_values = array_count_values($allowed_bundles);
+    if (count($allowed_bundles_count_values) != 1) {
+      $filter_bundle = TRUE;
+    }
+  }
+
+  foreach ($context['allowed_bundles'] as $bundle) {
+    if ($filter_bundle && isset($allowed_bundles[$bundle]) && !$allowed_bundles[$bundle]) {
+      continue;
+    }
+    $view_mode = field_view_mode_settings($entity_type, $bundle);
+    if (isset($view_mode[IEF_TABLE_VIEW_MODE_NAME]) && $view_mode[IEF_TABLE_VIEW_MODE_NAME]['custom_settings']) {
+      $change_apply = TRUE;
+      $old_fields = $fields;
+      $fields = array();
+
+      // Checking fields instances.
+      $fields_instance = field_info_instances($entity_type, $bundle);
+      $fields_hidden = array();
+      foreach ($fields_instance as $field_name => $field_instance) {
+        if ($field_instance['display'][IEF_TABLE_VIEW_MODE_NAME]['type'] == 'hidden') {
+          $fields_hidden[$field_name] = $field_name;
+          continue;
+        }
+        $field_label = module_exists('i18n_field') ? i18n_field_translate_property($field_instance, 'label') : $field_instance['label'];
+        $fields[$field_name] = array(
+          'type' => 'field',
+          'label' => $field_label,
+          'formatter' => $field_instance['display'][IEF_TABLE_VIEW_MODE_NAME]['type'],
+          'settings' => $field_instance['display'][IEF_TABLE_VIEW_MODE_NAME]['settings'],
+          'weight' => $field_instance['display'][IEF_TABLE_VIEW_MODE_NAME]['weight'],
+        );
+      }
+
+      $settings = field_bundle_settings($entity_type, $bundle);
+      // Default settings maybe has not registered any extra field.
+      foreach ($old_fields as $old_field_name => $old_field) {
+        // If this field is a property and this not exists in the settings.
+        if ($old_field['type'] == 'property' && !isset($settings['extra_fields']['display'][$old_field_name])) {
+          $settings['extra_fields']['display'][$old_field_name][IEF_TABLE_VIEW_MODE_NAME] = array(
+            'weight' => $old_field['weight'],
+            'visible' => TRUE,
+          );
+        }
+        // An old field is added if it is not added in $fields variable.
+        if ($old_field['type'] == 'field' && !isset($fields_hidden[$old_field_name]) && !isset($fields[$old_field_name])) {
+          $fields[$old_field_name] = $old_field;
+        }
+      }
+      $old_fields = array();
+
+      // Properties are added as configured from the UI.
+      foreach ($settings['extra_fields']['display'] as $name => $extra_field) {
+        if ((isset($extra_field[IEF_TABLE_VIEW_MODE_NAME]['visible']) && !$extra_field[IEF_TABLE_VIEW_MODE_NAME]['visible']) || !isset($original_fields[$name])) {
+          continue;
+        }
+
+        $fields[$name] = array(
+          'type' => 'property',
+          'label' => $original_fields[$name]['label'],
+          'weight' => $extra_field[IEF_TABLE_VIEW_MODE_NAME]['weight'],
+        );
+      }
+    }
+  }
+
+  if ($change_apply) {
+    drupal_alter('ief_table_view_mode_fields', $fields, $original_fields, $context);
+  }
+}
+
+/**
+ * Implements hook_entity_info_alter().
+ */
+function ief_table_view_mode_entity_info_alter(&$info) {
+  foreach ($info as $entity_type => $data) {
+    $info[$entity_type]['view modes'][IEF_TABLE_VIEW_MODE_NAME] = array(
+      'label' => t('Inline Entity Form Table'),
+      'custom settings' => FALSE,
+    );
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function ief_table_view_mode_form_field_ui_display_overview_form_alter(&$form, &$form_state) {
+  if ($form['#view_mode'] != IEF_TABLE_VIEW_MODE_NAME) {
+    return;
+  }
+
+  // It proceeds to hide a choice label.
+  foreach (element_children($form['fields']) as $field_name) {
+    $field_row = &$form['fields'][$field_name];
+    if ($field_row['#row_type'] == 'field') {
+      $field_row['label'] = array(
+        '#prefix' => check_plain(t('<Hidden>')),
+        '#type' => 'hidden',
+        '#value' => 'hidden',
+      );
+    }
+  }
+
+  $found_ief_fields = FALSE;
+  $entity_type = $form['#entity_type'];
+  $bundle = $form['#bundle'];
+  $entity_info = entity_get_info($entity_type);
+
+  $settings = field_bundle_settings($entity_type, $bundle);
+  $extra_fields = $settings['extra_fields']['display'];
+
+  if (isset($entity_info['inline entity form']) && isset($entity_info['inline entity form']['controller'])) {
+    $controller = new $entity_info['inline entity form']['controller']($entity_type, array());
+    $table_fields = $controller->tableFields(array($bundle));
+    foreach ($table_fields as $name => $table_field) {
+      if ($table_field['type'] == 'property' && !in_array($name, $form['#extra'])) {
+        $found_ief_fields = TRUE;
+        $form['#extra'][] = $name;
+
+        $display = isset($extra_fields[$name]) ? $extra_fields[$name][IEF_TABLE_VIEW_MODE_NAME] : array(
+          'weight' => $table_field['weight'],
+          'visible' => 'visible',
+        );
+
+        _ief_table_view_mode_add_extra_field($form['fields'], $name, $table_field, $display);
+      }
+    }
+  }
+
+  if ($found_ief_fields) {
+    $form['ief_table_view_mode_info'] = array(
+      '#markup' => '* ' . t('These fields come from the original definition of IEF.'),
+    );
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function ief_table_view_mode_form_field_ui_field_edit_form_alter(&$form, &$form_state) {
+  if ($form['#instance']['widget']['type'] != 'inline_entity_form') {
+
+    return;
+  }
+  if ($form['#field']['type'] == 'commerce_product_reference') {
+    $entity_type = 'commerce_product';
+  }
+  // @TODO: Maybe exists other type of fields that used widget inline entity form.
+  else {
+    $entity_type = $form['#field']['settings']['target_type'];
+  }
+
+  $entity_info = entity_get_info($entity_type);
+
+  if (!$entity_info['fieldable']) {
+
+    return;
+  }
+  $ief_settings = &$form['instance']['widget']['settings'];
+
+  $widget = $form['#instance']['widget'];
+  $message = t('Define which fields you want to display by configuring the view mode %name_view_name in the following bundles:', array(
+    '%name_view_name' => t('Inline Entity Form Table'),
+  ));
+  $ief_settings['type_settings']['ief_table_view_mode'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Inline Entity Form Table View Mode'),
+    '#description' => $message,
+  );
+
+  $options_link = array(
+    'attributes' => array(
+      'target' => '_blank',
+    ),
+  );
+  $bundle_admin_link = array();
+  $bundles = array();
+  foreach ($entity_info['bundles'] as $bundle => $bundle_info) {
+    $view_mode = field_view_mode_settings($entity_type, $bundle);
+    $path = $bundle_info['admin']['path'] . '/display';
+    $info = '';
+    $disabled = TRUE;
+    if (isset($view_mode[IEF_TABLE_VIEW_MODE_NAME]) && $view_mode[IEF_TABLE_VIEW_MODE_NAME]['custom_settings']) {
+      $path .= '/' . IEF_TABLE_VIEW_MODE_NAME;
+      $description = t('This <a href="!path" target="_blank">bundle</a> has the view mode activated.', array('!path' => url($path)));
+      $disabled = FALSE;
+    }
+    else {
+      $description = t('This <a href="!path" target="_blank">bundle</a> does <strong>not have</strong> activated the view mode.', array('!path' => url($path)));
+    }
+
+    $bundles[$bundle] = array(
+      '#type' => 'checkbox',
+      '#title' => $bundle_info['label'],
+      '#disabled' => $disabled,
+      '#default_value' => !$disabled && isset($widget['settings']['type_settings']['ief_table_view_mode']['bundles'][$bundle]) ? $widget['settings']['type_settings']['ief_table_view_mode']['bundles'][$bundle] : 0,
+      '#description' => $description,
+    );
+  }
+
+  $ief_settings['type_settings']['ief_table_view_mode']['bundles'] = array(
+    '#type' => 'container',
+  ) + $bundles;
+
+  $ief_settings['type_settings']['ief_table_view_mode']['note'] = array(
+    '#prefix' => '<em>',
+    '#suffix' => '</em>',
+    '#markup' => t('Select the bundle(s) to limit the fields you want to add. If you do not select any bundle(s), all displayed fields from activated bundles will appear in the widget. The latest bundle will define the order of fields.'),
+  );
+}
+
+/**
+ * Add a new extra field in the table of the UI.
+ *
+ * @param array $element
+ *   The element with all fields.
+ * @param string $name
+ *   The machine name of the extra field.
+ * @param array $table_field
+ *   The definition of the field from ief.
+ * @param array $display
+ *   The view setting of the field.
+ */
+function _ief_table_view_mode_add_extra_field(array &$element, $name, array $table_field, array $display) {
+  $element[$name] = array(
+    '#attributes' => array('class' => array('draggable', 'tabledrag-leaf')),
+    '#row_type' => 'extra_field',
+    '#region_callback' => 'field_ui_display_overview_row_region',
+    '#js_settings' => array('rowHandler' => 'field'),
+    'human_name' => array(
+      '#markup' => check_plain($table_field['label']) . '*',
+    ),
+    'weight' => array(
+      '#type' => 'textfield',
+      '#title' => t('Weight for @title', array('@title' => $table_field['label'])),
+      '#title_display' => 'invisible',
+      '#default_value' => $display['weight'],
+      '#size' => 3,
+      '#attributes' => array('class' => array('field-weight')),
+    ),
+    'parent_wrapper' => array(
+      'parent' => array(
+        '#type' => 'select',
+        '#title' => t('Parents for @title', array('@title' => $table_field['label'])),
+        '#title_display' => 'invisible',
+        '#options' => $element['#parent_options'],
+        '#empty_value' => '',
+        '#attributes' => array('class' => array('field-parent')),
+        '#parents' => array('fields', $name, 'parent'),
+      ),
+      'hidden_name' => array(
+        '#type' => 'hidden',
+        '#default_value' => $name,
+        '#attributes' => array('class' => array('field-name')),
+      ),
+    ),
+    'empty_cell' => array(
+      '#markup' => '&nbsp;',
+    ),
+    'format' => array(
+      'type' => array(
+        '#type' => 'select',
+        '#title' => t('Visibility for @title', array('@title' => $table_field['label'])),
+        '#title_display' => 'invisible',
+        '#options' => array(
+          'visible' => t('Visible'),
+          'hidden' => t('Hidden'),
+        ),
+        '#default_value' => $display['visible'] ? 'visible' : 'hidden',
+        '#parents' => array('fields', $name, 'type'),
+        '#attributes' => array('class' => array('field-formatter-type')),
+      ),
+    ),
+    'settings_summary' => array(),
+    'settings_edit' => array(),
+  );
+}
